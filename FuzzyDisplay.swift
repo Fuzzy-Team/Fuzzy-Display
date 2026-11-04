@@ -25,7 +25,11 @@ final class DisplayHelper: NSObject, NSApplicationDelegate {
     init(directory: URL, parent: pid_t) {
         self.directory = directory
         self.parent = parent
-        physical = NSScreen.main!
+        // NSScreen.main follows the focused Roblox window onto a virtual display.
+        let primaryID = CGMainDisplayID()
+        physical = NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == primaryID
+        }!
         let frame = NSWindow.frameRect(forContentRect: CGRect(x: 0, y: 0, width: 1920, height: 1080), styleMask: [.titled, .closable, .miniaturizable, .resizable])
         titleHeight = frame.height - 1080
     }
@@ -114,8 +118,16 @@ final class DisplayHelper: NSObject, NSApplicationDelegate {
         if (value(ax, "AXFullScreen") as? Bool) == true {
             try set(ax, "AXFullScreen", kCFBooleanFalse)
             ready = false
-            return // Space transitions settle on a later prepare request.
+            settlingUntil = Date().addingTimeInterval(1)
+            return // Wait for the Space transition before moving the window.
         }
+        guard let rawClose = value(ax, kAXCloseButtonAttribute) else { throw fail("Roblox does not expose its native title bar.") }
+        let close = unsafeBitCast(rawClose, to: AXUIElement.self)
+        let (windowPoint, _) = try frame(ax)
+        let (closePoint, closeSize) = try frame(close)
+        let measuredTitleHeight = 2 * (closePoint.y + closeSize.height / 2 - windowPoint.y)
+        guard measuredTitleHeight > 0, measuredTitleHeight < 200 else { throw fail("Cannot measure Roblox's native title bar.") }
+        titleHeight = measuredTitleHeight
         guard let targetScreen = screen() else { throw fail("Virtual screen disappeared.") }
         let insets = targetScreen.frame.height - targetScreen.visibleFrame.height
         let requiredHeight = Int(ceil(1080 + titleHeight + insets))
@@ -132,13 +144,17 @@ final class DisplayHelper: NSObject, NSApplicationDelegate {
         app.activate(options: [.activateIgnoringOtherApps])
         let (actualPoint, actualSize) = try frame(ax)
         guard abs(actualPoint.x - point.x) < 1, abs(actualPoint.y - point.y) < 1,
-              abs(actualSize.width - size.width) < 1, abs(actualSize.height - size.height) < 1 else { throw fail("macOS constrained the Roblox window; the 1920x1080 game area cannot be established.") }
+              abs(actualSize.width - size.width) < 1, abs(actualSize.height - size.height) < 1 else { ready = false; return }
         let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-        guard let info = windows.first(where: {
-            ($0[kCGWindowOwnerPID as String] as? Int) == Int(pid) &&
-            ($0[kCGWindowLayer as String] as? Int) == 0 &&
-            (($0[kCGWindowBounds as String] as? [String: CGFloat])?["Width"] ?? 0) >= 1920
-        }), let number = info[kCGWindowNumber as String] as? UInt32 else { throw fail("Roblox has no capturable window on Fuzzy Display.") }
+        guard let info = windows.first(where: { info in
+            guard (info[kCGWindowOwnerPID as String] as? Int) == Int(pid),
+                  (info[kCGWindowLayer as String] as? Int) == 0,
+                  let bounds = info[kCGWindowBounds as String] as? [String: CGFloat] else { return false }
+            return abs((bounds["X"] ?? .infinity) - point.x) < 1 &&
+                abs((bounds["Y"] ?? .infinity) - point.y) < 1 &&
+                abs((bounds["Width"] ?? 0) - size.width) < 1 &&
+                abs((bounds["Height"] ?? 0) - size.height) < 1
+        }), let number = info[kCGWindowNumber as String] as? UInt32 else { ready = false; return }
         windowPID = pid
         windowID = number
         ready = true
@@ -150,6 +166,8 @@ final class DisplayHelper: NSObject, NSApplicationDelegate {
         if preview == nil {
             let window = NSWindow(contentRect: physical.frame, styleMask: .borderless, backing: .buffered, defer: false)
             window.backgroundColor = .black
+            window.level = .statusBar
+            window.hasShadow = false
             window.ignoresMouseEvents = true
             window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
             let view = NSView(frame: window.contentView!.bounds)
@@ -186,7 +204,6 @@ final class DisplayHelper: NSObject, NSApplicationDelegate {
                 lastCommand = id
                 switch command["action"] as? String {
                 case "prepare":
-                    if let measured = command["title_height"] as? Double { titleHeight = CGFloat(measured); stream?.stop(); stream = nil }
                     try prepare()
                 case "hide": showPreview = false; preview?.orderOut(nil)
                 case "show": showPreview = true; preview?.orderFront(nil)
@@ -198,11 +215,12 @@ final class DisplayHelper: NSObject, NSApplicationDelegate {
             try validateDisplay()
             if ready {
                 let covering = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow, .excludeDesktopElements], windowID) as? [[String: Any]] ?? []
-                for info in covering where (info[kCGWindowAlpha as String] as? Double ?? 1) > 0 {
+                for info in covering where (info[kCGWindowAlpha as String] as? Double ?? 1) > 0 && (info[kCGWindowLayer as String] as? Int ?? 0) < CGWindowLevelForKey(.cursorWindow) {
                     if let raw = info[kCGWindowBounds as String] as? [String: Any],
                        let frame = CGRect(dictionaryRepresentation: raw as CFDictionary), frame.intersects(crop),
                        (info[kCGWindowOwnerPID as String] as? Int) != Int(windowPID) {
-                        throw fail("Another window covers Roblox on Fuzzy Display. Move it away, then restart the macro.")
+                        let owner = info[kCGWindowOwnerName as String] as? String ?? "Another app"
+                        throw fail("\(owner) covers Roblox on Fuzzy Display. Move its window away, then restart the macro.")
                     }
                 }
                 guard let (app, ax) = try window(), app.processIdentifier == windowPID else { ready = false; windowID = 0; publish(); return }
