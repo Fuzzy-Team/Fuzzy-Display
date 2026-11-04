@@ -103,7 +103,7 @@ final class DisplayHelper: NSObject, NSApplicationDelegate {
     func prepare() throws {
         if Date() < settlingUntil { return }
         try validateDisplay()
-        guard AXIsProcessTrusted() else { throw fail("Enable Accessibility permission for Fuzzy Display, then start the macro again.") }
+        guard AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary) else { throw fail("Enable Accessibility permission for Fuzzy Display, then start the macro again.") }
         guard let (app, ax) = try window() else { ready = false; windowID = 0; windowPID = 0; return }
         let pid = app.processIdentifier
         windowPID = pid
@@ -146,6 +146,7 @@ final class DisplayHelper: NSObject, NSApplicationDelegate {
     }
     func startPreview() throws {
         guard stream == nil, let display = display else { return }
+        guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else { throw fail("Enable Screen Recording permission for Fuzzy Display, then start the macro again.") }
         if preview == nil {
             let window = NSWindow(contentRect: physical.frame, styleMask: .borderless, backing: .buffered, defer: false)
             window.backgroundColor = .black
