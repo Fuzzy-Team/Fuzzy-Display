@@ -67,6 +67,14 @@ final class DisplayHelper: NSObject, NSApplicationDelegate {
         display = created
         let insets = physical.frame.height - physical.visibleFrame.height
         try configure(height: Int(ceil(1080 + titleHeight + insets)))
+        try useSRGBProfile(created.displayID)
+    }
+    // Gives the display the "sRGB IEC61966-2.1" profile (Internet & Web preset).
+    func useSRGBProfile(_ id: CGDirectDisplayID) throws {
+        let profile = URL(fileURLWithPath: "/System/Library/ColorSync/Profiles/sRGB Profile.icc")
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { throw fail("Cannot identify Fuzzy Display for color setup.") }
+        let profiles = [kColorSyncDeviceDefaultProfileID.takeUnretainedValue(): profile] as CFDictionary
+        guard ColorSyncDeviceSetCustomProfiles(kColorSyncDisplayDeviceClass.takeUnretainedValue(), uuid, profiles) else { throw fail("Cannot set the sRGB color profile on Fuzzy Display.") }
     }
     func configure(height: Int) throws {
         guard let display = display, height >= 1080, height <= 4096 else { throw fail("Invalid display geometry.") }
