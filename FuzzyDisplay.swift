@@ -21,6 +21,8 @@ final class DisplayHelper: NSObject, NSApplicationDelegate {
     var showPreview = true
     var ready = false
     var settlingUntil = Date.distantPast
+    var coveredSince: Date?
+    var coverError = ""
 
     init(directory: URL, parent: pid_t) {
         self.directory = directory
@@ -223,13 +225,25 @@ final class DisplayHelper: NSObject, NSApplicationDelegate {
             try validateDisplay()
             if ready {
                 let covering = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow, .excludeDesktopElements], windowID) as? [[String: Any]] ?? []
-                for info in covering where (info[kCGWindowAlpha as String] as? Double ?? 1) > 0 && (info[kCGWindowLayer as String] as? Int ?? 0) < CGWindowLevelForKey(.cursorWindow) {
-                    if let raw = info[kCGWindowBounds as String] as? [String: Any],
-                       let frame = CGRect(dictionaryRepresentation: raw as CFDictionary), frame.intersects(crop),
-                       (info[kCGWindowOwnerPID as String] as? Int) != Int(windowPID) {
-                        let owner = info[kCGWindowOwnerName as String] as? String ?? "Another app"
-                        throw fail("\(owner) covers Roblox on Fuzzy Display. Move its window away, then restart the macro.")
+                // Only normal app windows count. Menu bar items and notification banners sit on higher layers.
+                let cover = covering.first { info in
+                    guard (info[kCGWindowAlpha as String] as? Double ?? 1) > 0, (info[kCGWindowLayer as String] as? Int) == 0,
+                          (info[kCGWindowOwnerPID as String] as? Int) != Int(windowPID),
+                          let raw = info[kCGWindowBounds as String] as? [String: Any],
+                          let frame = CGRect(dictionaryRepresentation: raw as CFDictionary) else { return false }
+                    return frame.intersects(crop)
+                }
+                if let cover = cover {
+                    let since = coveredSince ?? Date()
+                    coveredSince = since
+                    if Date().timeIntervalSince(since) >= 4 { // Windows that appear briefly are not an error.
+                        coverError = "\(cover[kCGWindowOwnerName as String] as? String ?? "Another app") covers Roblox on Fuzzy Display. Move its window away, then restart the macro."
+                        error = coverError
                     }
+                } else {
+                    coveredSince = nil
+                    if error == coverError { error = "" } // The window is gone, so the error is too.
+                    coverError = ""
                 }
                 guard let (app, ax) = try window(), app.processIdentifier == windowPID else { ready = false; windowID = 0; publish(); return }
                 let (point, size) = try frame(ax)
